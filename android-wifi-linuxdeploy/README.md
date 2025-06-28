@@ -7,11 +7,12 @@ WLAN="wlan0"
 AP="ap0"
 AP_TYPE="managed"
 
-PREFIX_IP="192.168.3"
+PREFIX_IP="192.168.49"
 GW_IP="${PREFIX_IP}.1"
 MASK_IP="${PREFIX_IP}.0"
 SUB_MASK=24
 ROUTE_TABLE=97
+CACHE_DNS_HOURS=1h
 
 is_ap_exist() {
     local type=$(iw dev ${AP} info 2>/dev/null | grep -e "type ${AP_TYPE}")
@@ -41,13 +42,13 @@ kill_process() {
 
 delete_iptables_rule() {
     iptables-legacy -t nat -D POSTROUTING -s ${MASK_IP}/${SUB_MASK} ! -o ${AP} -j MASQUERADE
-    iptables-legacy -D FORWARD -i ${AP} -s ${GW_IP}/${SUB_MASK} -j ACCEPT
+    iptables-legacy -D FORWARD -i ${AP} -s ${MASK_IP}/${SUB_MASK} -j ACCEPT
     iptables-legacy -D FORWARD -i ${WLAN} -d ${MASK_IP}/${SUB_MASK} -j ACCEPT
 }
 
 add_iptables_rule() {
     iptables-legacy -t nat -I POSTROUTING -s ${MASK_IP}/${SUB_MASK} ! -o ${AP} -j MASQUERADE
-    iptables-legacy -I FORWARD -i ${AP} -s ${GW_IP}/${SUB_MASK} -j ACCEPT
+    iptables-legacy -I FORWARD -i ${AP} -s ${MASK_IP}/${SUB_MASK} -j ACCEPT
     iptables-legacy -I FORWARD -i ${WLAN} -d ${MASK_IP}/${SUB_MASK} -j ACCEPT
 }
 
@@ -62,14 +63,16 @@ enable_hotspot() {
     fi
 
     ip route add ${MASK_IP}/${SUB_MASK} dev ${AP} table ${ROUTE_TABLE}
+    echo 1 > /proc/sys/net/ipv4/conf/${WLAN}/forwarding 
     echo 1 > /proc/sys/net/ipv4/ip_forward
-
-    kill_process dnsmasq "${AP}"
-    dnsmasq -i ${AP} --dhcp-authoritative --no-negcache --user=root --no-resolv --no-hosts --server=8.8.8.8 --dhcp-range=${PREFIX_IP}.10,${PREFIX_IP}.200,${SUB_MASK}h 
 
     kill_process hostapd "/etc/hostapd/hostapd.conf"
     sleep 3
     hostapd -B /etc/hostapd/hostapd.conf
+
+    sleep 1
+    kill_process dnsmasq "${AP}"
+    dnsmasq -i ${AP} --dhcp-authoritative --no-negcache --user=root --no-resolv --no-hosts --no-poll --dhcp-option-force=43,ANDROID_METERED --server=8.8.8.8 --dhcp-range=${PREFIX_IP}.10,${PREFIX_IP}.200,${CACHE_DNS_HOURS}
 
     delete_iptables_rule
     add_iptables_rule
@@ -78,11 +81,18 @@ enable_hotspot() {
 while true; do
     state=$(cat /sys/class/net/wlan0/operstate)
     if [ ! "${state}" = "up" ]; then
-        ip link set dev ${WLAN} down
+        if [ "${state}" = "dormant" ]; then
+            ip link set dev ${WLAN} down
+        fi
         ip link set dev ${WLAN} up
-        enable_hotspot
+    else
+        state=$(cat /sys/class/net/ap0/operstate)
+        if [ ! "${state}" = "up" ]; then
+            enable_hotspot
+            sleep 10
+        fi
     fi
-    sleep 1
+    sleep 300
 done
 
 
